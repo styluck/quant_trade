@@ -3,9 +3,7 @@
 Created on Thu Apr  2 13:58:42 2026
 
 @author: lich5
-"""
-# -*- coding: utf-8 -*-
-"""
+
 Reference solution for assignment1.
 
 This script follows the assignment steps directly:

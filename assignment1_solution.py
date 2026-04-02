@@ -17,7 +17,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from data_io.io_framework import load_benchmark
 import matplotlib.pyplot as plt 
 from matplotlib.ticker import FuncFormatter
 import matplotlib.dates as mdates
@@ -61,43 +60,62 @@ def calc_nav(Pctchg, w, **kwargs):
     return {'nav':nav, 'pnl':pnl, 'turnover':turnover}
 
 
-def plot_equity(nav, bench_stats=None):
-
+def plot_equity(nav, bench_stats=None, label='Strategy', color='blue', ax=None):
     def format_two_dec(x, pos):
         return '%.2f' % x
-    
-    equity = nav
-    
-    plt.figure()
-    ax = plt.gca()
 
-    y_axis_formatter = FuncFormatter(format_two_dec)
-    ax.yaxis.set_major_formatter(FuncFormatter(y_axis_formatter))
-    ax.xaxis.set_tick_params(reset=True)
-    ax.yaxis.grid(linestyle=':')
-    ax.xaxis.set_major_locator(mdates.YearLocator(1))
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
-    ax.xaxis.grid(linestyle=':')
-    
-    equity.plot(lw=2, color='blue', alpha=0.6, x_compat=False,
-                label='Strategy', ax=ax)
+    # -------- clean nav index --------
+    nav = nav.copy()
+    nav.index = pd.to_datetime(nav.index, errors='coerce')
+    nav = nav[~nav.index.isna()].sort_index()
 
-    benchmark = bench_stats.pct_change()
-    benchmark.iloc[0] = 0
-    benchmark_nav = (1 + benchmark).cumprod()
-    benchmark_nav = benchmark_nav.reindex(pd.date_range(benchmark_nav.index[0], benchmark_nav.index[-1], freq='D'))
-    benchmark_nav = benchmark_nav.fillna(method = 'ffill')
-    benchmark_nav = benchmark_nav.dropna()
-    
-    benchmark_nav.plot(lw=2, color='gray', alpha=0.6, x_compat=False,
-                   label='Benchmark', ax=ax)
+    if ax is None:
+        plt.figure(figsize=(10, 5))
+        ax = plt.gca()
+        ax.yaxis.set_major_formatter(FuncFormatter(format_two_dec))
+        ax.xaxis.set_tick_params(reset=True)
+        ax.yaxis.grid(linestyle=':')
+        ax.xaxis.set_major_locator(mdates.YearLocator(1))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+        ax.xaxis.grid(linestyle=':')
+
+    nav.plot(lw=2, color=color, alpha=0.7, x_compat=False, label=label, ax=ax)
+
+    xmin = nav.index.min()
+    xmax = nav.index.max()
+
+    if bench_stats is not None:
+        benchmark = bench_stats.copy()
+        benchmark.index = pd.to_datetime(benchmark.index, errors='coerce')
+        benchmark = benchmark[~benchmark.index.isna()].sort_index()
+
+        if len(benchmark) > 0:
+            benchmark = benchmark.pct_change()
+            benchmark.iloc[0] = 0
+            benchmark_nav = (1 + benchmark).cumprod()
+            benchmark_nav = benchmark_nav.reindex(
+                pd.date_range(benchmark_nav.index[0], benchmark_nav.index[-1], freq='D')
+            )
+            benchmark_nav = benchmark_nav.ffill().dropna()
+
+            benchmark_nav.plot(
+                lw=2, color='gray', alpha=0.7,
+                x_compat=False, label='Benchmark', ax=ax
+            )
+
+            xmin = min(xmin, benchmark_nav.index.min())
+            xmax = max(xmax, benchmark_nav.index.max())
+
+    # 显式限制 x 轴范围，避免被异常索引拖到 1970
+    ax.set_xlim(xmin, xmax)
+
     ax.axhline(1.0, linestyle='--', color='black', lw=1)
     ax.set_ylabel('Cumulative returns')
-    ax.legend(loc='best')
     ax.set_xlabel('')
+    ax.legend(loc='best')
     plt.setp(ax.get_xticklabels(), visible=True, rotation=0, ha='center')
     return ax
-    
+
 
 def stock_selection(finalfac: pd.DataFrame, n: int, thres: float) -> pd.DataFrame:
     mat = pd.DataFrame(False, index=finalfac.index, columns=finalfac.columns)
@@ -126,8 +144,8 @@ def stock_selection(finalfac: pd.DataFrame, n: int, thres: float) -> pd.DataFram
     
 
 
-DATA_DIR = Path(__file__).resolve().parent / "chp3_data"
-FIELDS = ["close", "open", "high", "low", "pb", "pe_ttm", ]
+DATA_DIR = Path(__file__).resolve().parent / "dataset"
+FIELDS = ["close", "open", "high", "low", "pb", "pe_ttm", "total_mv" ]
 PRICE_FIELDS = ["open", "close", "high", "low"]
 
 
@@ -176,20 +194,22 @@ def load_data() -> dict[str, pd.DataFrame]:
 def build_factors(dataset: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     close = dataset["close"]
     pb = dataset["pb"]
-
+    mv = dataset["total_mv"]
     mom5 = close / close.shift(5) - 1
     bp = (1 / pb).replace([np.inf, -np.inf], np.nan)
-
+    
     weekly = {
         "close_w": close.resample("W").last(),
         "mom5_w": mom5.resample("W").last(),
         "bp_w": bp.resample("W").last(),
+        "mv_w": mv.resample("W").last(),
     }
     weekly["Pctchg"] = weekly["close_w"].pct_change()
 
     return {
         "mom5": mom5,
         "bp": bp,
+        "mv": mv,
         **weekly,
     }
 
@@ -230,8 +250,8 @@ if __name__ == "__main__":
     dataset = load_data() 
     features = build_factors(dataset)
 
-    factor_name = "mom5"  # alternative: "bp"
-    finalfac = features[f"{factor_name}_w"]
+    factor_name = "mom"  # alternative: "bp"
+    finalfac = -features[f"{factor_name}_w"]
     pctchg = features["Pctchg"]
 
     aligned_index = finalfac.index.intersection(pctchg.index)
