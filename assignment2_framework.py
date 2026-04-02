@@ -218,6 +218,30 @@ def build_factors(dataset: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     }
 
 
+def winsorize_row(row: pd.Series, lower: float = 0.02, upper: float = 0.98) -> pd.Series:
+    valid = row.dropna()
+    if valid.empty:
+        return row
+    lo = valid.quantile(lower)
+    hi = valid.quantile(upper)
+    return row.clip(lower=lo, upper=hi)
+
+def zscore_row(row: pd.Series) -> pd.Series:
+    valid = row.dropna()
+    if valid.shape[0] < 2:
+        return row * np.nan
+    mu = valid.mean()
+    sd = valid.std(ddof=0)
+    if sd == 0 or np.isnan(sd):
+        return row * np.nan
+    return (row - mu) / sd
+
+def preprocess_exposure(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out = out.apply(winsorize_row, axis=1)
+    out = out.apply(zscore_row, axis=1)
+    return out
+
 def estimate_factor_returns(features,factor_names):
     ret_next = features['ret_w'].shift(-1)
     factor_returns = pd.DataFrame(
