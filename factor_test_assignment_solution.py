@@ -37,8 +37,13 @@ import matplotlib.dates as mdates
 # ============================================================
 # 1. Data loading and feature construction
 # ============================================================
-
 DATA_DIR = Path(__file__).resolve().parent / "dataset"
+
+# Industry information file.
+# The file should contain columns such as:
+#   ts_code, l1_code, l2_code, l3_code, in_date
+INDUSTRY_FILE = DATA_DIR / "stk_company_info.csv"
+
 FIELDS = ["close", "pb", "total_mv", "adj_factor"]
 
 
@@ -562,23 +567,140 @@ def plot_factor_test_result(result: dict[str, object]) -> None:
     plt.tight_layout()
     plt.show()
 
+# ============================================================
+# Industry neutralization
+# ============================================================
 
+def get_industries(ind: str = "l1_code") -> pd.DataFrame:
+    """
+    Load industry classification information.
+
+    Parameters
+    ----------
+    ind : str
+        Industry column name. Common choices include:
+        'l1_code', 'l2_code', 'l3_code',
+        'l1_name', 'l2_name', 'l3_name'.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame indexed by stock code, with columns [ind, 'in_date'].
+    """
+    industry = pd.read_csv(INDUSTRY_FILE)
+    industry.index = industry["ts_code"]
+    industry = industry[[ind, "in_date"]]
+    return industry
+
+
+class IndustryNeutral:
+    """
+    Industry neutralization by within-industry z-score.
+
+    For each date t and each industry g, this transformation applies
+
+        F_neutral[t, i] = (F[t, i] - mean_g[t]) / std_g[t],
+
+    where stock i belongs to industry g.
+    """
+
+    def __init__(self, ind: str = "l1_code"):
+        self.ind = ind
+        self.industry = get_industries(ind)
+
+    def __call__(self, factor: pd.DataFrame | dict[str, pd.DataFrame]):
+        """
+        Apply industry neutralization.
+
+        Parameters
+        ----------
+        factor : pd.DataFrame or dict[str, pd.DataFrame]
+            Factor matrix, or a dictionary of factor matrices.
+
+        Returns
+        -------
+        pd.DataFrame or dict[str, pd.DataFrame]
+            Industry-neutralized factor matrix or dictionary.
+        """
+        if isinstance(factor, dict):
+            out = {}
+            for factor_name, factor_df in factor.items():
+                out[factor_name] = self._neutralize_one_factor(factor_df)
+                print(f'factor "{factor_name}" neutralized.')
+            return out
+
+        if isinstance(factor, pd.DataFrame):
+            return self._neutralize_one_factor(factor)
+
+        raise TypeError("factor must be a pandas DataFrame or a dictionary of DataFrames.")
+
+    def _neutralize_one_factor(self, factor: pd.DataFrame) -> pd.DataFrame:
+        """
+        Industry-neutralize one factor matrix.
+        """
+        fac = factor.copy()
+        code_list = self.industry.index.tolist()
+
+        # Build a stock-to-industry mapping for the columns of the factor matrix.
+        stock_industry = pd.Series(index=fac.columns, dtype=object)
+
+        for code in fac.columns:
+            if code not in code_list:
+                stock_industry.loc[code] = "0"
+                continue
+
+            ind_info = self.industry.loc[code]
+
+            # If one stock has multiple industry records, keep the latest one.
+            if isinstance(ind_info, pd.DataFrame) and len(ind_info) > 1:
+                ind_info = ind_info[ind_info["in_date"] == ind_info["in_date"].max()]
+                ind_info = ind_info.iloc[0]
+
+            stock_industry.loc[code] = ind_info[self.ind]
+
+        stock_industry = stock_industry.fillna("0")
+
+        unique_industries = stock_industry.unique()
+        unique_industries = [g for g in unique_industries if g != "0"]
+
+        for g in unique_industries:
+            cols = stock_industry[stock_industry == g].index
+
+            if len(cols) == 0:
+                continue
+
+            sub = fac.loc[:, cols]
+
+            mean = sub.mean(axis=1, skipna=True)
+            std = sub.std(axis=1, skipna=True, ddof=0)
+
+            # Avoid division by zero.
+            std = std.replace(0, np.nan)
+
+            fac.loc[:, cols] = sub.sub(mean, axis=0).div(std, axis=0)
+
+        return fac
 # ============================================================
 # 5. Main
 # ============================================================
-
 if __name__ == "__main__":
     dataset = load_data()
     features = build_weekly_features(dataset)
 
     returns = features["ret_w"]
 
-    factor_dict = {
+    raw_factor_dict = {
         "size": features["size_w"],
         "value": features["value_w"],
         "momentum": features["mom_w"],
         "volatility": features["vol_w"],
     }
+
+    # --------------------------------------------------------
+    # Industry neutralization
+    # --------------------------------------------------------
+    neutralizer = IndustryNeutral(ind="l1_code")
+    neutral_factor_dict = neutralizer(raw_factor_dict)
 
     num_groups = 5
     comsn = 0.001
@@ -586,58 +708,95 @@ if __name__ == "__main__":
 
     all_stats = {}
 
-    # Run detailed factor test for each factor.
-    # To avoid producing too many figures, only plot one representative factor.
-    plot_factor_name = "value"
+    # Plot one representative factor to avoid too many figures.
+    plot_factor_name = "size" # size value momentum volatility
 
-    for factor_name, factor_matrix in factor_dict.items():
+    for factor_name, factor_matrix in neutral_factor_dict.items():
         result = factor_test(
             factor_matrix,
             returns,
             num_groups=num_groups,
             comsn=comsn,
             min_obs=min_obs,
-            name=factor_name,
+            name=f"{factor_name}_industry_neutral",
             plot=(factor_name == plot_factor_name),
             display=True,
         )
 
-        all_stats[factor_name] = result["ic_stats"]
+        all_stats[f"{factor_name}_industry_neutral"] = result["ic_stats"]
 
     summary_table = pd.DataFrame(all_stats).T
 
-    print("\nFactor testing assignment solution")
+    print("\nFactor testing assignment solution with industry neutralization")
     print("\nSummary table:")
     print(summary_table)
 
-    # Optional: compare average group returns of all factors.
-    # Students may comment this part out if they only need one factor.
+    # Optional: compare raw factor and industry-neutralized factor.
+    compare_factor_name = "value"
+
+    print("\nRaw vs. industry-neutralized comparison:")
+    raw_result = factor_test(
+        raw_factor_dict[compare_factor_name],
+        returns,
+        num_groups=num_groups,
+        comsn=comsn,
+        min_obs=min_obs,
+        name=f"{compare_factor_name}_raw",
+        plot=False,
+        display=False,
+    )
+
+    neutral_result = factor_test(
+        neutral_factor_dict[compare_factor_name],
+        returns,
+        num_groups=num_groups,
+        comsn=comsn,
+        min_obs=min_obs,
+        name=f"{compare_factor_name}_industry_neutral",
+        plot=False,
+        display=False,
+    )
+
+    compare_table = pd.concat(
+        [
+            raw_result["ic_stats"],
+            neutral_result["ic_stats"],
+        ],
+        axis=1,
+    )
+
+    compare_table.columns = [
+        f"{compare_factor_name}_raw",
+        f"{compare_factor_name}_industry_neutral",
+    ]
+
+    print(compare_table)
+
+    # Optional: compare average group returns before and after neutralization.
     plt.figure(figsize=(10, 5))
 
-    for factor_name, factor_matrix in factor_dict.items():
-        result = factor_test(
-            factor_matrix,
-            returns,
-            num_groups=num_groups,
-            comsn=comsn,
-            min_obs=min_obs,
-            name=factor_name,
-            plot=False,
-            display=False,
-        )
-        avg_group_return = result["avg_group_return"]
-        plt.plot(
-            np.arange(1, num_groups + 1),
-            avg_group_return.values,
-            marker="o",
-            label=factor_name,
-        )
+    plt.plot(
+        np.arange(1, num_groups + 1),
+        raw_result["avg_group_return"].values,
+        marker="o",
+        label=f"{compare_factor_name} raw",
+    )
+
+    plt.plot(
+        np.arange(1, num_groups + 1),
+        neutral_result["avg_group_return"].values,
+        marker="o",
+        label=f"{compare_factor_name} industry neutral",
+    )
 
     plt.axhline(0.0, linestyle="--", linewidth=1)
-    plt.xticks(np.arange(1, num_groups + 1), [f"G{i}" for i in range(1, num_groups + 1)])
+    plt.xticks(
+        np.arange(1, num_groups + 1),
+        [f"G{i}" for i in range(1, num_groups + 1)],
+    )
     plt.xlabel("Factor group")
     plt.ylabel("Average next-period return")
-    plt.title("Average Group Returns Across Factors")
+    plt.title(f"Raw vs. Industry-Neutral Group Returns: {compare_factor_name}")
     plt.legend(loc="best")
     plt.grid(linestyle=":", alpha=0.6)
     plt.tight_layout()
